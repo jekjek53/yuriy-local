@@ -121,7 +121,12 @@ def validate(args):
     if empty:raise ValueError('Пустые обязательные поля: '+'; '.join(empty))
     if sum(map(len,out.values()))>100000 or sum(len(v.splitlines()) for v in out.values())>1500:raise ValueError('Документ ограничен 100000 символов и 1500 строками полей.')
     for key in ('demands','attachments'):
-        out[key]='\n'.join(re.sub(r'^\s*(?:\d+[.)]|[•])\s+','',line) for line in out[key].splitlines())
+        items=[re.sub(r'^\s*(?:\d+[.)]|[•])\s*','',line).strip() for line in out[key].splitlines()]
+        items=[line for line in items if line]
+        if not items:
+            label=dict(schema['fields'])[key]
+            raise ValueError('Пустые обязательные поля: '+label)
+        out[key]='\n'.join(items)
     return {'templateId':tid,'fields':out,'profile':profile(args.get('profile')),'calculation':calculation(args.get('calculation',{'method':'none'}))}
 
 

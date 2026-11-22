@@ -7,28 +7,56 @@ from .storage import text,strict_date
 
 DAY_PATTERNS=[r'понедельник(?:а|у|ом|е)?',r'вторник(?:а|у|ом|е)?',r'сред(?:а|у|ы|е|ой)',r'четверг(?:а|у|ом|е)?',r'пятниц(?:а|у|ы|е|ей)',r'суббот(?:а|у|ы|е|ой)',r'воскресень(?:е|я|ю|ем|и)']
 DAY_NAMES=['понедельник','вторник','среда','четверг','пятница','суббота','воскресенье']
+MONTH_NAMES={
+    'январ':1,'феврал':2,'март':3,'апрел':4,'ма':5,'июн':6,
+    'июл':7,'август':8,'сентябр':9,'октябр':10,'ноябр':11,'декабр':12,
+}
+MONTH_PATTERN=r'(?:январ[ьяе]|феврал[ьяе]|март[ае]?|апрел[ьяе]|ма[йяе]|июн[ьяе]|июл[ьяе]|август[ае]?|сентябр[ьяе]|октябр[ьяе]|ноябр[ьяе]|декабр[ьяе])'
 COMMAND=r'(?:напомни(?:те)?|запиши(?:те)?|запланируй(?:те)?|поставь(?:те)?|добавь(?:те)?|внеси(?:те)?|создай(?:те)?)'
-TEMPORAL=r'сегодня|завтра|послезавтра|'+('|'.join(DAY_PATTERNS))+r'|\d{1,2}[:.-]\d{2}|календар|событи|напоминани|задач'
-TIME=re.compile(r'(?<![\d./:-])(\d{1,2})[:-](\d{2})(?![\d./:-])')
+TEMPORAL=(
+    r'\b(?:сегодня|завтра|послезавтра|утром|дн[её]м|вечером|весь\s+день|на\s+(?:этой|следующей|прошлой)\s+неделе|кажд(?:ый|ую|ое)|еженедельн|ежедневн)\b'
+    r'|\b(?:'+('|'.join(DAY_PATTERNS))+r')\b'
+    r'|(?<![\d./:-])\d{1,2}[:-]\d{2}(?![\d./:-])'
+    r'|(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)(?!\d)'
+    r'|\b\d{1,2}\s+'+MONTH_PATTERN+r'\b'
+    r'|\bчерез\s+\d+\s*(?:минут|час|дн|сут|недел|месяц)'
+    r'|\b(?:календар|расписани|событи|напоминани|встреч|заседани|созвон|звонок)'
+)
+QUESTION_TAIL=(
+    r'(?:мне\s+|нам\s+)?(?:'
+    r'что\s+такое|как(?:ой|ая|ое|ие|им|их)?\b|почему\b|зачем\b|когда\s+наступает|где\s+найти|сколько\b|определение\b'
+    r'|(?:про\s+|о\s+|об\s+)?(?:стать[юиейя]|норм[уыае]|закон|кодекс|гк\b|апк\b|гпк\b|упк\b|кас\b|нк\b|тк\b|коап\b|правил[ао]|порядок|услови[яйе]|основани[яйе]|признак|поняти[ея]|практик[уиа]|пленум|обзор|срок\s+исковой\s+давност|исков(?:ую|ой)\s+давност|подсудност|госпошлин|ответственност|обязательств|расторжени|неустойк|реквизит|позици[юия])'
+    r')'
+)
+COLON_TIME=re.compile(r'(?<![\d./:-])(\d{1,2}):(\d{2})(?![\d./:-])')
+DASH_TIME=re.compile(r'(?<![\d./:-])(?:(\b(?:в|во|к|с|до|около|на)\s+)(\d{1,2})-(\d{2})|(\d{1,2})-(00|05|10|15|20|25|30|35|40|45|50|55))(?![\d./:-])',re.I)
+
+
+def _month_num(word):
+    w=word.lower()
+    for prefix,num in MONTH_NAMES.items():
+        if w.startswith(prefix):return num
+    return None
 
 
 def is_event_instruction(value):
     """Route direct imperatives, not legal questions, quoted instructions or examples."""
     value=value.strip()
-    if re.search(r'^[«"“`]|(?:^|\n)\s*>',value) or re.match(r'(?:не\s+|что\s+|как\s+|почему\s+|объясни|проанализируй|пример|составь|в договоре)',value,re.I):return False
+    if not value or value.endswith('?'):return False
+    if re.search(r'^[«"“`]|(?:^|\n)\s*>',value) or re.match(r'(?:не\s+|что\s+|как\s+|почему\s+|зачем\s+|объясни|проанализируй|пример|составь|в договоре)',value,re.I):return False
     value=re.sub(r'^юрий\b[\s,!:\-]*','',value,flags=re.I)
     value=re.sub(r'^пожалуйста[\s,]*','',value,flags=re.I)
     cmd=re.match(COMMAND+r'\b',value,re.I)
     if cmd:
-        tail=value[cmd.end():].strip(' ,:')
-        if re.match(r'(?:мне\s+)?(?:что такое|как\b|почему\b|определение\b)',tail,re.I):return False
-        return bool(re.match(r'напомни',value,re.I) or re.search(TEMPORAL,tail,re.I))
+        tail=value[cmd.end():].strip(' ,:—-')
+        if re.match(QUESTION_TAIL,tail,re.I):return False
+        return bool(re.search(TEMPORAL,tail,re.I))
     # A short factual preamble followed by an explicit reminder command.
-    return bool(len(value)<=1000 and re.match(r'(?:у меня\b|завтра\b|сегодня\b|в\s+(?:'+('|'.join(DAY_PATTERNS))+r')\b)',value,re.I) and re.search(r'\bнапомни(?:те)?\b',value,re.I))
+    return bool(len(value)<=1000 and re.match(r'(?:у меня\b|завтра\b|сегодня\b|послезавтра\b|в\s+(?:'+('|'.join(DAY_PATTERNS))+r')\b)',value,re.I) and re.search(r'\bнапомни(?:те)?\b',value,re.I))
 
 
 def propose(value,tz,instant):
-    value=text(value,5000).strip();days=set();warnings=[];remove=[];invalid=False;candidates=[]
+    value=text(value,5000).strip();days=set();warnings=[];remove=[];invalid=False;candidates=[];partial_date_seen=False
     zones=set()
     for pattern,zt in [(r'\b(?:мск|московск(?:ое|ому|ого)\s+врем(?:я|ени))\b','Europe/Moscow'),(r'\bсамарск(?:ое|ому|ого)\s+врем(?:я|ени)\b','Europe/Samara')]:
         for match in re.finditer(pattern,value,re.I):zones.add(zt);remove.append(match.span())
@@ -41,9 +69,34 @@ def propose(value,tz,instant):
     if len(zones)>1:warnings.append('Указано несколько часовых поясов. Уточните зону и время вручную.')
     today=instant.astimezone(ZoneInfo(tz)).date()
     for m in re.finditer(r'(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)|(?<!\d)\d{1,2}\.\d{1,2}\.\d{4}(?!\d)',value):
-        raw=m.group();day=strict_date(raw) if '-' in raw else date(*map(int,raw.split('.')[::-1]));days.add(day.isoformat());remove.append(m.span())
+        raw=m.group()
+        try:
+            day=strict_date(raw) if '-' in raw else date(*map(int,raw.split('.')[::-1]))
+        except ValueError:
+            raise ValueError('Некорректная календарная дата в исходном тексте.')
+        days.add(day.isoformat());remove.append(m.span())
+    for m in re.finditer(r'(?<!\d)(\d{1,2})\s+('+MONTH_PATTERN+r')(?:\s+(\d{4})(?:\s*(?:г\.?|года))?)?\b',value,re.I):
+        d_num=int(m.group(1));m_num=_month_num(m.group(2));y_str=m.group(3)
+        if y_str:
+            try:day=date(int(y_str),m_num,d_num)
+            except ValueError:raise ValueError('Некорректная календарная дата в исходном тексте.')
+            days.add(day.isoformat());remove.append(m.span())
+        else:
+            partial_date_seen=True
+            for cand_year in (today.year,today.year+1):
+                try:
+                    cand=date(cand_year,m_num,d_num)
+                    if cand.isoformat() not in candidates:candidates.append(cand.isoformat())
+                except ValueError:pass
+            if not candidates:raise ValueError('Некорректная календарная дата в исходном тексте.')
     for pattern,offset in [(r'\bсегодня\b',0),(r'\bзавтра\b',1),(r'\bпослезавтра\b',2)]:
         for m in re.finditer(pattern,value,re.I):days.add((today+timedelta(days=offset)).isoformat());remove.append(m.span())
+    for m in re.finditer(r'\bчерез\s+(\d{1,3})\s*(?:календарн\w+\s+|рабоч\w+\s+)?(дн(?:я|ей)|сут(?:ки|ок)|недел(?:ю|и|ь))\b',value,re.I):
+        qty=int(m.group(1));unit=m.group(2).lower()
+        delta_days=qty*7 if unit.startswith('недел') else qty
+        cand=(today+timedelta(days=delta_days)).isoformat()
+        if cand not in candidates:candidates.append(cand)
+        warnings.append(f'Относительный срок «{m.group(0)}» не вычисляется автоматически: выберите {cand} или уточните дату по правилам календаря.')
     week=list(re.finditer(r'\bна\s+(этой|следующей|прошлой)\s+неделе\b',value,re.I))
     weekdays=[]
     for wd,pattern in enumerate(DAY_PATTERNS):
@@ -70,15 +123,24 @@ def propose(value,tz,instant):
     if re.search(r'\bкажд(?:ый|ую|ое|ую неделю)|еженедельн|ежедневн',value,re.I):
         invalid=True;warnings.append('Повторяющиеся события не поддерживаются в V1. Укажите одну конкретную дату.')
     times=set()
-    for m in TIME.finditer(value):
+    for m in COLON_TIME.finditer(value):
         h,minute=map(int,m.groups())
         if h>23 or minute>59:raise ValueError('Неверное время в исходном тексте.')
         times.add(f'{h:02}:{minute:02}');remove.append(m.span())
+    for m in DASH_TIME.finditer(value):
+        if m.group(2) is not None:
+            h,minute=int(m.group(2)),int(m.group(3))
+            if h>23 or minute>59:raise ValueError('Неверное время в исходном тексте.')
+            times.add(f'{h:02}:{minute:02}');remove.append((m.start(2),m.end(3)))
+        else:
+            h,minute=int(m.group(4)),int(m.group(5))
+            if h>23:continue  # Non-prepositional NN-MM > 23 (e.g. office/case 45-00) is not a clock time.
+            times.add(f'{h:02}:{minute:02}');remove.append(m.span())
     if len(days)!=1 or invalid:warnings.append('Дата не определена однозначно. Укажите её вручную; год и процессуальный срок не вычисляются автоматически.')
     if len(zones)>1:times=set()
     if len(times)>1:warnings.append('Несколько значений времени: уточните начало и окончание.')
     if not times and not re.search(r'\bвесь день\b',value,re.I):warnings.append('Время не указано. Введите время или явно выберите событие «весь день».')
-    if re.search(r'(?<![\d.])\d{1,2}[./]\d{1,2}(?![.\d])',value) and not days:warnings.append('Дата без года не дополнена предположением.')
+    if (re.search(r'(?<![\d.])\d{1,2}[./]\d{1,2}(?![.\d])',value) or partial_date_seen) and not days:warnings.append('Дата без года не дополнена предположением.')
     kind='other'
     for pattern,k in [(r'заседани|судебн','hearing'),(r'претензи|процессуальн|обжалован|апелляц|срок','deadline'),(r'отправ|письм','letter'),(r'контроль.*ответ','response'),(r'встреч|звонок','meeting'),(r'задач','task')]:
         if re.search(pattern,value,re.I):kind=k;break

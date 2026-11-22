@@ -95,7 +95,10 @@ class ChatEngine:
                 elif not cfg['timezoneConfirmed']:
                     local_text='Для предложения события подтвердите часовой пояс секретаря. Затем откройте предложение из исходного сообщения. Событие ещё не записано; внешний API не вызывался.'
                 else:
-                    proposal=propose(content,cfg['timezone'],datetime.now(timezone.utc));local_text=proposal_text(proposal)
+                    try:
+                        proposal=propose(content,cfg['timezone'],datetime.now(timezone.utc));local_text=proposal_text(proposal)
+                    except ValueError as exc:
+                        local_text='Не удалось однозначно разобрать дату или время поручения: '+str(exc)+' Событие не записано; внешний API не вызывался. Вы можете открыть поля и указать дату/время вручную.'
                 summary={'documentIds':fids,'externalApiCalled':False,'route':'local-secretary-v2','eventProposal':proposal,'timezoneAtRequest':cfg['timezone'],'timezoneConfirmed':cfg['timezoneConfirmed']}
                 message=await asyncio.to_thread(ws.start_generation,pid,tid,request_id,content,'Локальный секретарь','D' if deep else 'B',expected,summary,local_text)
                 return {'requestId':request_id,'reused':False,'route':'local-secretary-v2'}

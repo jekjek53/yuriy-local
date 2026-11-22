@@ -191,6 +191,7 @@ class Workspace:
         self.db_path = self.safe('.yuriy/app.sqlite3')
         self.safe('projects').mkdir(exist_ok=True)
         self.safe('.yuriy/backups').mkdir(exist_ok=True)
+        self.cleanup_temporary()
         with self.connect() as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -211,6 +212,42 @@ class Workspace:
 
     def close(self):
         self._lock_file.close()
+
+    def cleanup_temporary(self, max_age_seconds=86400):
+        projects_dir = self.safe('projects')
+        if not projects_dir.exists():
+            return 0
+        cutoff = datetime.now(timezone.utc).timestamp() - max_age_seconds
+        removed = 0
+        for pdir in projects_dir.iterdir():
+            if pdir.is_symlink() or not pdir.is_dir():
+                continue
+            temp_dir = pdir / 'temporary'
+            if temp_dir.is_symlink() or not temp_dir.is_dir():
+                continue
+            for item in list(temp_dir.iterdir()):
+                try:
+                    if item.is_symlink():
+                        continue
+                    newest = item.stat().st_mtime
+                    if item.is_dir():
+                        for sub in item.rglob('*'):
+                            if not sub.is_symlink():
+                                newest = max(newest, sub.stat().st_mtime)
+                    if newest <= cutoff:
+                        if item.is_dir():
+                            shutil.rmtree(item)
+                        else:
+                            item.unlink(missing_ok=True)
+                        removed += 1
+                except OSError:
+                    continue
+            try:
+                if not any(temp_dir.iterdir()):
+                    temp_dir.rmdir()
+            except OSError:
+                pass
+        return removed
 
     def safe(self, relative):
         rel = workspace_relative(relative)
