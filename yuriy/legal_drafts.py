@@ -189,3 +189,107 @@ def assemble(data,sources,check_info=None,source_status=None):
     preview='\n\n'.join(label+'\n'+fields[key] for key,label in schema['fields'])
     if data['calculation']['lines']:preview+='\n\n'+'\n'.join(data['calculation']['lines'])
     return {'compact':outputs[0],'review':outputs[1],'text':preview,'templateSha256':sha,'placeholders':placeholders,'version':VERSION}
+
+
+FREEFORM_KINDS={
+    'legal_opinion':'Правовое заключение',
+    'disagreement_protocol':'Протокол разногласий',
+    'addendum':'Дополнительное соглашение',
+    'contract':'Проект договора',
+    'response_letter':'Ответ на претензию / письмо',
+    'procedural_motion':'Ходатайство / отзыв / заявление',
+    'memo':'Аналитическая справка',
+}
+
+
+def assemble_freeform_docx(args,sources=None):
+    """Build a GOST-styled freeform legal DOCX (opinion, protocol of disagreements, contract, addendum, motion)."""
+    from docx.enum.style import WD_STYLE_TYPE
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    if not isinstance(args,dict):raise ValueError('Ожидается структурированное описание документа.')
+    doc_kind=args.get('docKind','legal_opinion')
+    if doc_kind not in FREEFORM_KINDS:doc_kind='legal_opinion'
+    doc_label=FREEFORM_KINDS[doc_kind]
+    heading=clean(text(args.get('heading') or args.get('title') or doc_label,300))
+    subtitle=clean(text(args.get('subtitle',''),500)) if args.get('subtitle') else ''
+    requisites=clean(text(args.get('requisites',''),4000)) if args.get('requisites') else ''
+    sections_in=args.get('sections')
+    if not isinstance(sections_in,list) or not 1<=len(sections_in)<=40:
+        raise ValueError('Документ должен содержать от 1 до 40 разделов.')
+    norm_sections=[]
+    placeholders=[]
+    for idx,sec in enumerate(sections_in,1):
+        if not isinstance(sec,dict):raise ValueError('Раздел документа должен быть объектом.')
+        sh=clean(text(sec.get('heading',f'Раздел {idx}'),300))
+        raw_body=str(sec.get('body',''))
+        raw_body=re.sub(r'^\s*\|.*\|\s*$',lambda m:re.sub(r'\s*\|\s*',' — ',m.group(0).strip(' |')),raw_body,flags=re.M)
+        raw_body=re.sub(r'^\s*---+\s*$','',raw_body,flags=re.M)
+        raw_body=re.sub(r'```[a-zA-Z0-9_-]*','',raw_body)
+        sb=clean(text(raw_body,30000))
+        if not sb:continue
+        if '[УТОЧНИТЬ' in sb or '[УТОЧНИТЬ' in sh:placeholders.append(sh or f'Раздел {idx}')
+        norm_sections.append({'heading':sh,'body':sb})
+    if not norm_sections:raise ValueError('Заполните содержательный текст разделов документа.')
+    signature=clean(text(args.get('signature','[УТОЧНИТЬ: должность, ФИО, подпись]'),1000))
+    doc_date=clean(text(args.get('documentDate',''),100)) if args.get('documentDate') else ''
+    prof=profile(args.get('profile'))
+    sources=sources or []
+
+    outputs=[]
+    for review in (False,True):
+        d=Document()
+        for name in ('LegalBody','LegalRequisites','LegalHeading','LegalDemand','LegalAttachment','LegalSignature','LegalService'):
+            st=d.styles.add_style(name,WD_STYLE_TYPE.PARAGRAPH);st.base_style=d.styles['Normal']
+        d.sections[0].header.paragraphs[0].text='ЧЕРНОВИК · ПОДГОТОВЛЕНО АГЕНТОМ ЮРИЙ';d.sections[0].header.paragraphs[0].style='LegalService'
+        d.add_paragraph('ЧЕРНОВИК','LegalHeading')
+        if requisites:
+            table=d.add_table(rows=1,cols=2);table.autofit=False
+            borders=OxmlElement('w:tblBorders')
+            for side in ('top','left','bottom','right','insideH','insideV'):
+                el=OxmlElement('w:'+side);el.set(qn('w:val'),'nil');borders.append(el)
+            table._tbl.tblPr.append(borders)
+            cell=table.cell(0,1);cell.paragraphs[0].style='LegalRequisites'
+            first=True
+            for line in requisites.splitlines():
+                if not line.strip():continue
+                if first:cell.paragraphs[0].text=line.strip();first=False
+                else:cell.add_paragraph(line.strip(),'LegalRequisites')
+        d.add_paragraph(heading.upper(),'LegalHeading')
+        if subtitle:d.add_paragraph(subtitle,'LegalHeading')
+        for sec in norm_sections:
+            if sec['heading']:d.add_paragraph(sec['heading'],'LegalHeading')
+            for para in sec['body'].splitlines():
+                if para.strip():d.add_paragraph(para.strip(),'LegalBody')
+        if doc_date:d.add_paragraph('Дата: '+doc_date,'LegalSignature')
+        if signature:
+            for line in signature.splitlines():
+                if line.strip():d.add_paragraph(line.strip(),'LegalSignature')
+        d.add_page_break()
+        d.add_paragraph('Источники и чек-лист проверки','LegalHeading')
+        warn='Подготовлено агентом Юрием как рабочий черновик ('+doc_label+'). Проверьте факты, реквизиты, актуальную редакцию норм РФ и судебную практику перед подписанием или подачей.'
+        if placeholders:warn+=' Содержит места для уточнения [УТОЧНИТЬ]: '+', '.join(placeholders[:8])+'.'
+        d.add_paragraph(warn,'LegalService')
+        src_lines=source_context(sources[:8],review) if sources else ['Документ сформирован по материалам проекта и правовому анализу агента. Проверьте первоисточники вручную.']
+        for line in src_lines:
+            d.add_paragraph(xml_text(line),'LegalService')
+        d.add_paragraph('Чек-лист юриста','LegalHeading')
+        for item in ('Заполнить все поля [УТОЧНИТЬ] и проверить реквизиты сторон.','Сверить ссылки на статьи кодексов РФ, постановления Пленума ВС РФ и судебные акты.','Проверить форматирование в текстовом редакторе и снять пометку «ЧЕРНОВИК» после вычитки.'):
+            d.add_paragraph('☐ '+item,'LegalService')
+        if review:
+            d.add_paragraph('Рабочий след сверки','LegalHeading')
+            d.add_paragraph('Свободный юридический документ: '+doc_kind+' · '+VERSION,'LegalService')
+        set_profile(d,prof)
+        d.core_properties.author='Юрий';d.core_properties.last_modified_by='Юрий'
+        d.core_properties.created=datetime.now(timezone.utc);d.core_properties.modified=datetime.now(timezone.utc)
+        d.core_properties.comments='Черновик агента Юрия. Требует проверки юристом.'
+        buf=io.BytesIO();d.save(buf);outputs.append(buf.getvalue())
+
+    plain_parts=[heading]
+    if subtitle:plain_parts.append(subtitle)
+    if requisites:plain_parts.append(requisites)
+    for sec in norm_sections:
+        plain_parts.append((sec['heading']+'\n' if sec['heading'] else '')+sec['body'])
+    if doc_date:plain_parts.append('Дата: '+doc_date)
+    if signature:plain_parts.append(signature)
+    return {'compact':outputs[0],'review':outputs[1],'text':'\n\n'.join(plain_parts),'docKind':doc_kind,'docTypeLabel':doc_label,'placeholders':placeholders,'profile':prof,'version':VERSION}

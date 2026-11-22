@@ -532,8 +532,8 @@ class Workspace:
                 # A delayed checkpoint must never roll a final status/text back.
                 if m.get('status')!='running': return m
                 updates=dict(updates)
-                if len(updates.get('text',m['text']))<len(m['text']):updates['text']=m['text']
-                allowed={'text','status','error','errorCode','usage','finishReason','streamDiagnostics'}
+                if not updates.pop('_replaceText',False) and len(updates.get('text',m['text']))<len(m['text']):updates['text']=m['text']
+                allowed={'text','status','error','errorCode','usage','finishReason','streamDiagnostics','agentMeta','kind'}
                 m.update({k:v for k,v in updates.items() if k in allowed})
                 m['updatedAt']=now()
                 db.execute('UPDATE messages SET data=? WHERE id=?',(json.dumps(m,ensure_ascii=False),mid))

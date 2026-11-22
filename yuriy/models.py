@@ -99,7 +99,7 @@ class ModelSettings:
         self.path = self.directory/'models.json'
         self.secrets = secrets or DpapiSecrets(self.directory/'api-key.dpapi')
         self.lock = threading.RLock()
-        self.values = {'endpoint': DEFAULT_ENDPOINT, 'modelB': '', 'modelD': '', 'modelC': '', 'verificationEnabled': False, 'consent': False, 'maxOutputTokens': 1800, 'maxOutputTokensD': None, 'maxOutputTokensC': None}
+        self.values = {'endpoint': DEFAULT_ENDPOINT, 'modelB': '', 'modelD': '', 'modelC': '', 'verificationEnabled': False, 'webLegalSearchEnabled': False, 'consent': False, 'maxOutputTokens': 1800, 'maxOutputTokensD': None, 'maxOutputTokensC': None}
         if self.path.exists():
             try:
                 stored = json.loads(self.path.read_text('utf-8'))
@@ -119,6 +119,9 @@ class ModelSettings:
         if 'verificationEnabled' in data:
             if type(data['verificationEnabled']) is not bool:raise ValueError('Неверное разрешение проверки C.')
             out['verificationEnabled']=data['verificationEnabled']
+        if 'webLegalSearchEnabled' in data:
+            if type(data['webLegalSearchEnabled']) is not bool:raise ValueError('Неверное разрешение веб-поиска правовой базы РФ.')
+            out['webLegalSearchEnabled']=data['webLegalSearchEnabled']
         if 'consent' in data:
             if type(data['consent']) is not bool: raise ValueError('Неверное согласие на передачу данных.')
             out['consent'] = data['consent']

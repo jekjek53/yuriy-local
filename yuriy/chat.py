@@ -38,12 +38,14 @@ class Job:
 
 
 class ChatEngine:
-    def __init__(self, workspace_getter, settings, provider, documents_getter=None, secretary_getter=None):
+    def __init__(self, workspace_getter, settings, provider, documents_getter=None, secretary_getter=None, operations_getter=None, legal_kb_getter=None):
         self.workspace_getter = workspace_getter
         self.settings = settings
         self.provider = provider
         self.documents_getter = documents_getter
         self.secretary_getter = secretary_getter
+        self.operations_getter = operations_getter
+        self.legal_kb_getter = legal_kb_getter
         self.jobs = {}
         self.current = None
         self.lock = asyncio.Lock()
@@ -117,6 +119,100 @@ class ChatEngine:
                 if len(self.jobs)>20 and self.jobs[key].done: del self.jobs[key]
             job.task=asyncio.create_task(self._run(job,cfg,messages))
             return {'requestId':request_id,'reused':False}
+
+    async def start_agent(self, body):
+        """Start an autonomous multi-step legal agent run (`intake` essay or `execute` assignment)."""
+        from .agent import build_package_overview, run_agent_loop
+        request_id=ident(body['requestId']);pid=ident(body['projectId']);tid=ident(body['threadId'])
+        mode=body.get('mode','execute')
+        if mode not in ('intake','execute'):raise ValueError('Режим агента должен быть intake или execute.')
+        default_intake='Проведи первичный агентный разбор загруженного пакета документов: составь краткое эссе, выяви пробелы, ошибки, нестыковки и правовые риски по законодательству РФ и судебной практике, и предложи варианты решений на выбор.'
+        content=text(body.get('text') or (default_intake if mode=='intake' else ''),12000).strip()
+        if not content:raise ValueError('Укажите поручение для агента.')
+        expected=body.get('revision')
+        if type(expected) is not int:raise ValueError('Не указан номер редакции.')
+        deep=body.get('deep',False)
+        if type(deep) is not bool:raise ValueError('Неверный режим запроса.')
+        fids=body.get('documentIds',[])
+        if not isinstance(fids,list) or len(fids)>16 or any(not isinstance(v,str) for v in fids) or len(set(fids))!=len(fids):
+            raise ValueError('Выберите до 16 различных материалов для агентного разбора.')
+        for fid in fids:ident(fid)
+        if fids and body.get('documentsConsent') is not True:
+            raise ValueError('Подтвердите передачу материалов проекта внешнему API.')
+        digest=hashlib.sha256(('agent:'+mode+':'+content).encode()).hexdigest()
+        async with self.lock:
+            ws=self.workspace_getter()
+            existing=await asyncio.to_thread(ws.generation,request_id)
+            if existing:
+                m=existing['message']
+                if existing['projectId']!=pid or existing['threadId']!=tid or m.get('contextSummary',{}).get('agentDigest')!=digest:
+                    raise Conflict('Этот requestId уже использован другим запросом.')
+                return {'requestId':request_id,'reused':True,'route':'agent-v1'}
+            self.guard()
+            state=await asyncio.to_thread(ws.read)
+            p=next((x for x in state['state']['projects'] if x['id']==pid),None)
+            if not p or p['archived']:raise ValueError('Проект не найден или находится в архиве.')
+            t=next((x for x in p['threads'] if x['id']==tid),None)
+            if not t:raise ValueError('Обсуждение не найдено.')
+            use_deep=deep and bool(self.settings.public().get('modelD'))
+            cfg=self.settings.for_request(use_deep)
+            cfg['maxOutputTokens']=max(cfg.get('maxOutputTokens',1800),3200)
+            document_block=None;document_summary=None
+            if fids:
+                if not self.documents_getter:raise ValueError('Индекс документов недоступен.')
+                document_block,document_summary=await asyncio.to_thread(build_package_overview,self.documents_getter(),pid,fids)
+            messages,summary=self.context(p,t,content,document_block,document_summary)
+            summary.update(documentIds=fids,route='agent-v1',agentMode=mode,agentDigest=digest,webSearch=bool(cfg.get('webLegalSearchEnabled')))
+            message=await asyncio.to_thread(ws.start_generation,pid,tid,request_id,content,cfg['model'],'D' if use_deep else 'B',expected,summary)
+            job=Job(request_id,pid,tid,message)
+            self.jobs[request_id]=job;self.current=job
+            for key in list(self.jobs):
+                if len(self.jobs)>20 and self.jobs[key].done:del self.jobs[key]
+            job.task=asyncio.create_task(self._run_agent(job,cfg,messages,mode,run_agent_loop))
+            return {'requestId':request_id,'reused':False,'route':'agent-v1'}
+
+    async def _run_agent(self,job,cfg,messages,mode,run_agent_loop):
+        ws=self.workspace_getter();started_at=time.monotonic();job.started=True
+        try:
+            if job.cancel_requested:raise asyncio.CancelledError
+            await asyncio.wait_for(
+                run_agent_loop(
+                    job=job,
+                    cfg=cfg,
+                    initial_messages=messages,
+                    mode=mode,
+                    ws=ws,
+                    documents_store=self.documents_getter() if self.documents_getter else None,
+                    operations_store=self.operations_getter() if self.operations_getter else None,
+                    legal_kb=self.legal_kb_getter() if self.legal_kb_getter else None,
+                    secretary_store=self.secretary_getter() if self.secretary_getter else None,
+                    provider=self.provider,
+                    web_search_enabled=bool(cfg.get('webLegalSearchEnabled')),
+                ),
+                timeout=420,
+            )
+            if not job.message['text'].strip():
+                raise ProviderError('empty','Агент завершил работу без текстового отчёта.')
+            job.message['status']='limited' if job.message.get('finishReason')=='length' else 'complete'
+        except asyncio.CancelledError:
+            job.message.update(status='cancelled',errorCode='cancelled',error='Выполнение агентного поручения отменено пользователем.')
+        except asyncio.TimeoutError:
+            job.message.update(status='error',errorCode='timeout',error='Превышен таймаут выполнения поручения (420 секунд). Частичный отчёт сохранён.')
+        except ProviderError as exc:
+            job.message.update(status='error',errorCode=exc.code,error=str(exc))
+        except Exception as exc:
+            job.message.update(status='error',errorCode='internal',error='Ошибка выполнения агентного поручения: '+str(exc)[:240])
+        finally:
+            job.message['streamDiagnostics']={**job.message.get('streamDiagnostics',{}),'receivedTextChars':len(job.message['text']),'elapsedMs':round((time.monotonic()-started_at)*1000)}
+            try:
+                job.message=await asyncio.to_thread(
+                    ws.update_generation,
+                    job.request_id,
+                    {**dict(job.message),'_replaceText':True},
+                )
+            except Exception:
+                job.message.update(status='error',errorCode='save_failed',error='Отчёт НЕ подтверждён как сохранённый на диске. Скопируйте текст до закрытия страницы.')
+            job.done=True;job.signal()
 
 
     async def check(self,body):

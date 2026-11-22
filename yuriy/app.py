@@ -20,11 +20,12 @@ from .chat import ChatEngine
 from .documents import Documents
 from .operations import Operations
 from .secretary import Secretary
+from .legal_kb import LegalKnowledgeBase
 from .notifications import notify_windows
 from .desktop import open_word_copy
 from .storage import Workspace, Conflict, MAX_STATE, MAX_UPLOAD, no_link, text
 
-VERSION = '0.6.0-m4'
+VERSION = '0.7.0-agent'
 STATIC = Path(__file__).parent/'static'/'index.html'
 
 def config_dir():
@@ -53,7 +54,15 @@ def create_app(config_path=None, workspace=None, preview=False, provider=None, s
 
     settings = ModelSettings(config_path.parent, secrets=secrets_store)
     provider = provider or OpenAIProvider()
-    chat = ChatEngine(lambda: ws(), settings, provider, documents_getter=lambda: docstore(), secretary_getter=lambda: secretary())
+    chat = ChatEngine(
+        lambda: ws(),
+        settings,
+        provider,
+        documents_getter=lambda: docstore(),
+        secretary_getter=lambda: secretary(),
+        operations_getter=lambda: opstore(),
+        legal_kb_getter=lambda: legalkb(),
+    )
     if context['workspace']: context['workspace'].recover_generations()
 
     stop_scheduler=asyncio.Event()
@@ -144,6 +153,10 @@ def create_app(config_path=None, workspace=None, preview=False, provider=None, s
         if context.get('secretary') is None:context['secretary']=Secretary(ws(),docstore(),notify_windows if not preview else None)
         return context['secretary']
 
+    def legalkb():
+        if context.get('legal_kb') is None:context['legal_kb']=LegalKnowledgeBase(ws())
+        return context['legal_kb']
+
     @app.get('/api/secretary')
     async def secretary_center():return await asyncio.to_thread(secretary().center)
 
@@ -189,7 +202,8 @@ def create_app(config_path=None, workspace=None, preview=False, provider=None, s
     @app.get('/', response_class=HTMLResponse)
     def index():
         nonce = secrets.token_urlsafe(18)
-        html = STATIC.read_text('utf-8').replace('// __M4_MODULE__', (STATIC.parent/'m4.js').read_text('utf-8')).replace('// __LEGAL_DRAFTS__', (STATIC.parent/'legal-drafts.js').read_text('utf-8')).replace('// __CHAT_LAYOUT__', (STATIC.parent/'chat-layout.js').read_text('utf-8')).replace('/* __CHAT_LAYOUT_CSS__ */', (STATIC.parent/'chat-layout.css').read_text('utf-8')).replace('__LOCAL_TOKEN__', token)
+        agent_js = (STATIC.parent/'agent-ui.js').read_text('utf-8') if (STATIC.parent/'agent-ui.js').exists() else ''
+        html = STATIC.read_text('utf-8').replace('// __M4_MODULE__', (STATIC.parent/'m4.js').read_text('utf-8')).replace('// __LEGAL_DRAFTS__', (STATIC.parent/'legal-drafts.js').read_text('utf-8')).replace('// __CHAT_LAYOUT__', (STATIC.parent/'chat-layout.js').read_text('utf-8') + '\n' + agent_js).replace('/* __CHAT_LAYOUT_CSS__ */', (STATIC.parent/'chat-layout.css').read_text('utf-8')).replace('__LOCAL_TOKEN__', token)
         html = html.replace('<script>', '<script nonce="'+nonce+'">')
         response = HTMLResponse(html)
         response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'nonce-"+nonce+"'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'" + ("; frame-ancestors 'none'" if not preview else '')
@@ -429,6 +443,30 @@ def create_app(config_path=None, workspace=None, preview=False, provider=None, s
     async def start_chat(request: Request):
         body = json.loads(await limited_body(request, 64000))
         return await chat.start(body)
+
+    @app.post('/api/agent/run')
+    async def start_agent_run(request: Request):
+        body = json.loads(await limited_body(request, 64000))
+        return await chat.start_agent(body)
+
+    @app.get('/api/legal-kb')
+    async def list_legal_kb(q: str = ''):
+        if q.strip():
+            return {'entries': await asyncio.to_thread(legalkb().search_local, q, 12)}
+        return {'entries': await asyncio.to_thread(legalkb().list_entries)}
+
+    @app.post('/api/legal-kb')
+    async def add_legal_kb(request: Request):
+        body = json.loads(await limited_body(request, 250000))
+        async with chat.lock:
+            chat.guard()
+            return await asyncio.to_thread(legalkb().add_entry, body)
+
+    @app.delete('/api/legal-kb/{entry_id}')
+    async def delete_legal_kb(entry_id: str):
+        async with chat.lock:
+            chat.guard()
+            return await asyncio.to_thread(legalkb().delete_entry, entry_id)
 
     @app.get('/api/chat/active')
     def active_chat(): return {'active':chat.status()}

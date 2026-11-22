@@ -13,7 +13,7 @@ import time
 import uuid
 from pathlib import Path
 from .storage import Conflict,MAX_STATE,ident,text,now,validate_state
-from .legal_drafts import validate as validate_draft, assemble, SCHEMAS
+from .legal_drafts import validate as validate_draft, assemble, assemble_freeform_docx, SCHEMAS
 
 
 def digest(raw):return hashlib.sha256(raw).hexdigest()
@@ -185,6 +185,62 @@ class Operations:
                 p['activity'].append({'text':('Сохранена новая редакция материала: ' if plan['kind']=='edit' else 'Создан DOCX-черновик: ')+plan['name'],'at':now()});p['activity']=p['activity'][-150:]
                 validate_state(state['state']);self.ws._write(db,state['state'],current+1)
             return {'operation':operation,'revision':current+1}
+
+    def commit_agent_docx(self,pid,args,sources=None):
+        """Atomically save an agent-generated DOCX (template or freeform) into project results."""
+        ident(pid)
+        title=text(args.get('title',''),200).strip()
+        if not title:raise ValueError('Укажите название создаваемого документа.')
+        sources=sources or []
+        if args.get('templateId'):
+            clean_args={k:v for k,v in args.items() if k in ('title','templateId','fields','profile','calculation')}
+            data=validate_draft(clean_args)
+            artifacts=assemble(data,sources)
+            doc_type=SCHEMAS[data['templateId']]['name']
+            jurisdiction=SCHEMAS[data['templateId']]['jurisdiction']
+            role_label=SCHEMAS[data['templateId']]['role']
+            gen_with='agent-docxtpl-v1'
+        else:
+            artifacts=assemble_freeform_docx(args,sources)
+            data=None
+            doc_type=artifacts['docTypeLabel']
+            jurisdiction='РФ'
+            role_label='Исполнитель'
+            gen_with='agent-freeform-v1'
+        raw=artifacts['compact'];review=artifacts['review'];body=artifacts['text']
+        rid=str(uuid.uuid4());review_id=str(uuid.uuid4())
+        filename='Черновик — '+re.sub(r'[\\/:*?"<>|\x00-\x1f]','_',title)[:100]+'.docx'
+        result={
+            'id':rid,'name':title,'text':body,'created':now(),'format':'docx','filename':filename,
+            'artifactSha256':digest(raw),'generatedBy':'server-m3b','generatedWith':gen_with,
+            'sourceMessageId':args.get('sourceMessageId'),'sourceStatus':'not-verified',
+            'reviewArtifactId':review_id,'reviewSha256':digest(review),
+            'documentType':doc_type,'jurisdiction':jurisdiction,'role':role_label,
+            'templateVersion':artifacts['version'],'unresolvedPlaceholders':artifacts.get('placeholders',[]),
+        }
+        if data:
+            result['templateData']=data
+            result['templateSha256']=artifacts['templateSha256']
+        with self.ws.lock:
+            state=self.ws.read()
+            p=next((x for x in state['state']['projects'] if x['id']==pid),None)
+            if not p or p['archived']:raise ValueError('Проект недоступен для записи результата.')
+            operation={'id':str(uuid.uuid4()),'kind':'result','at':now(),'confirmation':'agent-task-execution','confirmationId':'agent-'+uuid.uuid4().hex[:16],'preflight':None,'sha256':digest(raw),'resultId':rid,'name':title}
+            with self.ws.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                current=int(db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0])
+                latest_state=self.ws._read(db)
+                lp=next((x for x in latest_state['projects'] if x['id']==pid),None)
+                if not lp or lp['archived']:raise ValueError('Проект недоступен для записи результата.')
+                self.ws._result_file(pid,result)
+                write_new(self.ws.safe(f'projects/{pid}/results/{rid}.docx'),raw)
+                write_new(self.ws.safe(f'projects/{pid}/results/{review_id}.docx'),review)
+                lp['results'].append(result)
+                lp.setdefault('operations',[]).append(operation)
+                lp['updatedAt']=now()
+                lp['activity'].append({'text':'Агент Юрий создал DOCX: '+filename,'at':now()});lp['activity']=lp['activity'][-150:]
+                validate_state(latest_state);self.ws._write(db,latest_state,current+1)
+        return {'id':rid,'name':title,'filename':filename,'documentType':doc_type,'unresolvedPlaceholders':artifacts.get('placeholders',[]),'sha256':result['artifactSha256']}
 
     def result_file(self,pid,rid,format):
         ident(pid);ident(rid)
